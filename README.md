@@ -79,13 +79,14 @@ Two firmware versions are provided:
 
 ## Repository Structure
 
+```
 OsloMet-JetFlowFacility-Project-2026/
-├── 3d models/
-├── Circuit design/
-├── esp-code/
-├── Flowchart/
-├── Worksheet/
-└── README.md
+├── 3d models/         3D model files for printable enclosures and adapters
+├── Circuit design/    Schematic diagrams of the electronics
+├── esp-code/          ESP32 Arduino firmware (single and two screen versions)
+├── Flowchart/         Flowcharts of the code logic and experiment process
+└── Worksheet/         Student experiment worksheet
+```
 
 ## ESP32 Pinout
 

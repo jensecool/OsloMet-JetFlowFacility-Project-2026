@@ -19,7 +19,7 @@
 // === PWM CONFIG ===
 #define PWM_FREQ              12500   // 12.5 kHz
 #define PWM_CHANNEL           0
-#define PWM_RESOLUTION        8       // 8-bit (0–255)
+#define PWM_RESOLUTION        8       // 8-bit (0-255)
 
 // === FAN SETTINGS ===
 #define FAN_KICKSTART_SPEED   255     // Full speed
@@ -29,12 +29,12 @@
 #define TCA_ADDR              0x70
 
 // === PRESSURE SENSOR ===
-#define SENSOR_ADDR           0x38      // 0x28 for ELVH, 0x29 for DLHR
+#define SENSOR_ADDR           0x38      // ELVH-M250D-HRRJ-I-N3A5
 #define SENSOR_OFFSET_COUNTS  8192.0f   // count at 0 Pa (differential, 10-90% TF)
 #define SENSOR_FSS_COUNTS     6554.0f   // +/- full scale span in counts
-#define SENSOR_FSS_PA         25000.0f   // +/-250 mbar = +/-25000 Pa
+#define SENSOR_FSS_PA         25000.0f  // +/-250 mbar = +/-25000 Pa
 
-// Air density for Bernoulli. 
+// Air density for Bernoulli.
 #define AIR_DENSITY           1.225f
 
 // === GLOBAL VARIABLES ===
@@ -43,7 +43,7 @@ unsigned long last_time = 0;
 unsigned long rpm = 0;
 
 bool power_on = false;
-bool last_power_state = power_on;
+bool last_power_state = false;
 
 int fan_speed = 178; // 70% default
 int fan_speed_percentage = 0;
@@ -53,8 +53,8 @@ float velocity_mps = 0.0f;
 bool  sensor_present = false;
 
 rgb_lcd lcd;
-int fan_lcd_channel = 0;
-int pressure_lcd_channel = 1;
+// All output now goes to a single LCD on channel 0.
+int main_lcd_channel = 0;
 int pressure_sensor_channel = 2;
 
 // === FUNCTION DECLARATIONS ===
@@ -67,17 +67,13 @@ void configure_lcd(int channel);
 void reset_lcd(int channel);
 int get_pot_value_percent(int pin);
 int get_pot_value_8bit(int pin);
-void display_lcd_generic(int channel, String header, double number, String zero_value);
 void handle_power_off();
-void control_fan();
+void update_display();
 void control_panel_controller(void *pv_parameters);
 void switches_controller(void *pv_parameters);
-void toggle_switch_generic(int switch_pin, bool &device_state, int led_pin, const char *device_name, void (*callback)() = nullptr, bool reverse_expected_value = false);
 void scan_i2c_with_tca();
-void configure_pressure_lcd();
 bool read_pressure_sensor(float *out_pa);
 float pressure_to_velocity(float pa);
-void control_pressure();
 
 
 // === I2C Multiplexer Channel Select ===
@@ -122,9 +118,11 @@ void configure_lcd(int channel) {
     tca_select(channel);
     delay(10);
     lcd.begin(16, 2);
-    lcd.setRGB(255, 255, 0);  // Green backlight
+    lcd.setRGB(0, 255, 0);  // Green backlight
     lcd.setCursor(0, 0);
-    lcd.print("LCD 2 Ready");
+    lcd.print("Jet facility");
+    lcd.setCursor(0, 1);
+    lcd.print("Starting...");
 }
 
 // === Clear LCD ===
@@ -140,32 +138,15 @@ void reset_lcd(int channel) {
 // === Read Potentiometer: % Output ===
 int get_pot_value_percent(int pin) {
     uint16_t value = analogRead(pin);
-    if (value <= 409) return 0; //Potentiometer below 10% can be formatted to 0%
+    if (value <= 409) return 0; // Below 10% rounds to 0%
     return map(value, 409, 4095, 0, 100);
 }
 
 // === Read Potentiometer: 8-bit Output ===
 int get_pot_value_8bit(int pin) {
     uint16_t value = analogRead(pin);
-    if (value <= 409) return 0; //Potentiometer below 10% can be formatted to 0%
+    if (value <= 409) return 0; // Below 10% rounds to 0%
     return map(value, 409, 4095, 26, 255);
-}
-
-// === Display on LCD ===
-void display_lcd_generic(int channel, String header, double number, String zero_value) {
-    tca_select(channel);
-    delay(10);
-
-    if (number > 0) {
-        lcd.setCursor(0, 0);
-        lcd.print(header);
-        lcd.setCursor(0, 1);
-        lcd.print(number);
-        lcd.print("           ");
-    } else {
-        lcd.setCursor(0, 1);
-        lcd.print(zero_value);
-    }
 }
 
 // === Handle Power Off ===
@@ -173,21 +154,8 @@ void handle_power_off() {
     fan_speed = 0;
     pressure_pa = 0.0f;
     velocity_mps = 0.0f;
-    reset_lcd(fan_lcd_channel);
-    reset_lcd(pressure_lcd_channel);
+    reset_lcd(main_lcd_channel);
     set_fan_speed();
-}
-
-// === Configure Pressure LCD ===
-void configure_pressure_lcd() {
-    tca_select(pressure_lcd_channel);
-    delay(10);
-    lcd.begin(16, 2);
-    lcd.setRGB(255, 255, 0);  // Green backlight to distinguish from fan LCD
-    lcd.setCursor(0, 0);
-    lcd.print("Pressure + vel");
-    lcd.setCursor(0, 1);
-    lcd.print("Waiting sensor");
 }
 
 // === Read the pressure sensor ===
@@ -223,100 +191,98 @@ float pressure_to_velocity(float pa) {
     return sqrtf(2.0f * pa / AIR_DENSITY);
 }
 
-// === Pressure Control ===
-void control_pressure() {
+// === Update the single display with all values ===
+// Line 1: Fs:XX% v:XX.Xm/s
+// Line 2: P: XXXX Pa
+void update_display() {
+    // Read fan pot
+    fan_speed_percentage = get_pot_value_percent(FAN_POT_PIN);
+    fan_speed = get_pot_value_8bit(FAN_POT_PIN);
+    set_fan_speed();
+    calculate_fan_rpm();
+
+    // Read pressure sensor
     float pa = 0.0f;
     sensor_present = read_pressure_sensor(&pa);
-
-    tca_select(pressure_lcd_channel);
-    delay(10);
-
-    // Always clear both lines first so old text never lingers
-    lcd.setCursor(0, 0);
-    lcd.print("                ");
-    lcd.setCursor(0, 1);
-    lcd.print("                ");
-
-    if (!sensor_present) {
-        lcd.setCursor(0, 0);
-        lcd.print("Sensor: missing");
-        lcd.setCursor(0, 1);
-        lcd.print("Check I2C ch 2");
-        return;
+    if (sensor_present) {
+        pressure_pa = pa;
+        velocity_mps = pressure_to_velocity(pa);
     }
 
-    pressure_pa = pa;
-    velocity_mps = pressure_to_velocity(pa);
-
+    // Build the two display lines
     char l0[17];
     char l1[17];
-    snprintf(l0, sizeof(l0), "P: %6.1f Pa", pressure_pa);
-    snprintf(l1, sizeof(l1), "v: %5.2f m/s", velocity_mps);
 
+    // Line 1: fan speed percentage and velocity with unit
+    snprintf(l0, sizeof(l0), "Fs:%d%% v:%.1fm/s",
+             fan_speed_percentage, velocity_mps);
+
+    // Line 2: pressure, or a warning if the sensor is missing
+    if (sensor_present) {
+        snprintf(l1, sizeof(l1), "P: %.0f Pa", pressure_pa);
+    } else {
+        snprintf(l1, sizeof(l1), "Sensor missing");
+    }
+
+    // Write to the single LCD on channel 0
+    tca_select(main_lcd_channel);
+    delay(10);
+    lcd.setCursor(0, 0);
+    lcd.print("                ");  // clear line 1
     lcd.setCursor(0, 0);
     lcd.print(l0);
     lcd.setCursor(0, 1);
+    lcd.print("                ");  // clear line 2
+    lcd.setCursor(0, 1);
     lcd.print(l1);
 
-    Serial.printf("Pressure=%.1f Pa   Velocity=%.2f m/s\n",
-                  pressure_pa, velocity_mps);
+    // Also log to serial
+    Serial.printf("Fan=%d%%  Pressure=%.1f Pa  Velocity=%.2f m/s\n",
+                  fan_speed_percentage, pressure_pa, velocity_mps);
 }
 
-// === Fan Control ===
-void control_fan() {
-    fan_speed_percentage = get_pot_value_percent(FAN_POT_PIN);
-    fan_speed = get_pot_value_8bit(FAN_POT_PIN);
-    display_lcd_generic(fan_lcd_channel, "Fan speed:", fan_speed_percentage, "Fan is off");
-    set_fan_speed();
-    calculate_fan_rpm();
-}
-
-// === Fan Panel Task (Core 0) ===
+// === Control Panel Task (Core 0) ===
 void control_panel_controller(void *pv_parameters) {
-    configure_lcd(fan_lcd_channel);
-    configure_pressure_lcd();
+    configure_lcd(main_lcd_channel);
 
     while (1) {
         if (!power_on) {
             handle_power_off();
+            last_power_state = false;
             delay(500);
             continue;
         }
 
-        // If power JUST came back on, re-init LCDs to recover from any glitch
-        if (!last_power_state){
-            configure_lcd(fan_lcd_channel);
-            configure_pressure_lcd();
+        // If power JUST came back on, re-init the LCD to recover from any glitch
+        if (!last_power_state) {
+            configure_lcd(main_lcd_channel);
             last_power_state = true;
             delay(100);
         }
-        control_fan();
-        control_pressure();
+
+        update_display();
         delay(100);
     }
 }
 
 // === Switches Task (Core 1) ===
+// Momentary switch with edge detection: one press toggles power_on.
 void switches_controller(void *pv_parameters) {
+    bool last_switch_reading = HIGH;  // INPUT_PULLUP: not pressed = HIGH
+
     while (1) {
-        toggle_switch_generic(POWER_SWITCH_PIN, power_on, POWER_LED_PIN, "Fan", nullptr, true);
-        delay(100);
-    }
-}
+        bool current_reading = digitalRead(POWER_SWITCH_PIN);
 
-// === Toggle Switch Handler ===
-void toggle_switch_generic(int switch_pin, bool &device_state, int led_pin, const char *device_name, void (*callback)(), bool reverse_expected_value) {
-    bool expected_value = reverse_expected_value ? HIGH : LOW;
-    if (digitalRead(switch_pin) == expected_value) {
-        device_state = !device_state;
-        digitalWrite(led_pin, device_state);
-        Serial.printf("%s is %s\n", device_name, device_state ? "ON" : "OFF");
-
-        if (callback) {
-            callback();
+        // Detect transition from not-pressed (HIGH) to pressed (LOW)
+        if (last_switch_reading == HIGH && current_reading == LOW) {
+            power_on = !power_on;
+            digitalWrite(POWER_LED_PIN, power_on);
+            Serial.printf("Fan is %s\n", power_on ? "ON" : "OFF");
+            delay(50);  // short debounce
         }
 
-        delay(1000);  // Debounce delay
+        last_switch_reading = current_reading;
+        delay(20);
     }
 }
 

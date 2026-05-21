@@ -80,12 +80,12 @@ Two firmware versions are provided:
 ## Repository Structure
 
 OsloMet-JetFlowFacility-Project-2026/
-├── 3d models/                      3D model files for printable enclosures and adapters
-├── Circuit design/                 Schematic diagrams of the electronics
+├── 3d models/
+├── Circuit design/
 ├── esp-code/
-│   ├── esp-code.ino                Single screen firmware (current hardware)
-│   └── esp_code-2screens/          Two screen firmware (for a healthy ESP32)
-└── Worksheet/                      Student experiment worksheet
+├── Flowchart/
+├── Worksheet/
+└── README.md
 
 ## ESP32 Pinout
 

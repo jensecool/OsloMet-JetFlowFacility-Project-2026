@@ -37,6 +37,9 @@
 // Air density for Bernoulli.
 #define AIR_DENSITY           1.225f
 
+// Number of samples used to measure the zero offset at startup
+#define ZERO_CAL_SAMPLES      30
+
 // === GLOBAL VARIABLES ===
 volatile unsigned long pulse_count = 0;
 unsigned long last_time = 0;
@@ -51,6 +54,10 @@ int fan_speed_percentage = 0;
 float pressure_pa = 0.0f;
 float velocity_mps = 0.0f;
 bool  sensor_present = false;
+
+// Zero offset measured at startup. Subtracted from every reading.
+float pressure_offset_pa = 0.0f;
+bool  offset_calibrated = false;
 
 rgb_lcd lcd;
 // All output now goes to a single LCD on channel 0.
@@ -69,6 +76,7 @@ int get_pot_value_percent(int pin);
 int get_pot_value_8bit(int pin);
 void handle_power_off();
 void update_display();
+void calibrate_pressure_zero();
 void control_panel_controller(void *pv_parameters);
 void switches_controller(void *pv_parameters);
 void scan_i2c_with_tca();
@@ -184,6 +192,35 @@ bool read_pressure_sensor(float *out_pa) {
     return true;
 }
 
+// === Calibrate the zero offset ===
+// Takes several readings with no airflow and averages them.
+// Call this once when the system powers on, before the fan spins up.
+void calibrate_pressure_zero() {
+    Serial.println("Calibrating pressure zero...");
+    float sum = 0.0f;
+    int valid_samples = 0;
+
+    for (int i = 0; i < ZERO_CAL_SAMPLES; i++) {
+        float p = 0.0f;
+        if (read_pressure_sensor(&p)) {
+            sum += p;
+            valid_samples++;
+        }
+        delay(20);
+    }
+
+    if (valid_samples > 0) {
+        pressure_offset_pa = sum / valid_samples;
+        offset_calibrated = true;
+        Serial.printf("Pressure offset = %.1f Pa (from %d samples)\n",
+                      pressure_offset_pa, valid_samples);
+    } else {
+        pressure_offset_pa = 0.0f;
+        offset_calibrated = false;
+        Serial.println("Zero calibration failed: no valid samples");
+    }
+}
+
 // === Convert differential pressure to velocity via Bernoulli ===
 // v = sqrt(2 * dP / rho). Negative dP clamps to 0.
 float pressure_to_velocity(float pa) {
@@ -205,8 +242,16 @@ void update_display() {
     float pa = 0.0f;
     sensor_present = read_pressure_sensor(&pa);
     if (sensor_present) {
-        pressure_pa = pa;
-        velocity_mps = pressure_to_velocity(pa);
+        // Subtract the zero offset measured at startup
+        float corrected = pa - pressure_offset_pa;
+
+        // Clamp tiny negative noise to 0 so the display rests at 0
+        if (corrected < 0.0f) {
+            corrected = 0.0f;
+        }
+
+        pressure_pa = corrected;
+        velocity_mps = pressure_to_velocity(corrected);
     }
 
     // Build the two display lines
@@ -253,9 +298,10 @@ void control_panel_controller(void *pv_parameters) {
             continue;
         }
 
-        // If power JUST came back on, re-init the LCD to recover from any glitch
+        // If power JUST came back on, re-init the LCD and calibrate zero
         if (!last_power_state) {
             configure_lcd(main_lcd_channel);
+            calibrate_pressure_zero();   // measure offset with no flow
             last_power_state = true;
             delay(100);
         }
